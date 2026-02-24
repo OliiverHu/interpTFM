@@ -31,12 +31,14 @@ _, layers = extract_activations(
     model_adapter=adapter,
     layers=[LAYER],
     store=store,
-    extraction_cfg={
-        "batch_size": 8,      # small
-        "max_length": 512,    # reduce memory
-        "model_name": "scgpt",
-        "start_shard": 0,
-    },
+    extraction_cfg = {
+    "batch_size": 8,
+    "max_length": 512,
+    "model_name": "scgpt",
+    "max_shards": 512,
+    # optional override if you want fixed size:
+    # "target_tokens_per_shard": 12000
+    }
 )
 
 print("Extracted layers:", layers)

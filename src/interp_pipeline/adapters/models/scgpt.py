@@ -116,40 +116,32 @@ class ScGPTAdapter(ModelAdapter):
         capture_cfg: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Capture layer outputs via forward hooks on norm2 modules.
-        Returns dict[layer_name -> Tensor[B,T,H]] on CPU.
+        Reliable capture: manually iterate transformer layers and record outputs.
+        Avoids the nested-tensor TransformerEncoder fast-path where hooks don't fire.
         """
         model = model_handle.model
         device = model_handle.device
 
-        genes = batch["genes"].to(device)
-        expressions = batch["expressions"].to(device)
-        src_key_padding_mask = batch["src_key_padding_mask"].to(device)
+        genes = batch["genes"].to(device)                  # [B,T]
+        expressions = batch["expressions"].to(device)      # [B,T]
+        padmask = batch["src_key_padding_mask"].to(device) # [B,T] bool
 
-        # Map layer_name -> module
-        layer_to_module = {}
+        # Build input embeddings as model.forward does
+        x = model.encoder(genes) + model.value_encoder(expressions)  # [B,T,H]
+
+        # Parse which layer indices we want
+        want = {}
         for lname in layers:
             if not lname.endswith(".norm2"):
-                raise ValueError(f"Unsupported layer name for scGPT adapter: {lname}")
+                raise ValueError(f"Unsupported layer name for scGPT: {lname}")
             idx = int(lname.split("_")[1].split(".")[0])
-            layer_to_module[lname] = model.transformer_encoder.layers[idx].norm2
+            want[idx] = lname
 
         captured: Dict[str, torch.Tensor] = {}
-        hooks = []
-
-        def make_hook(name: str):
-            def hook(_module, _inp, out):
-                # out expected: [B,T,H]
-                captured[name] = out.detach().to("cpu")
-            return hook
-
-        for lname, module in layer_to_module.items():
-            hooks.append(module.register_forward_hook(make_hook(lname)))
-
         with torch.no_grad():
-            _ = model(genes, expressions, src_key_padding_mask)
-
-        for h in hooks:
-            h.remove()
+            for i, layer in enumerate(model.transformer_encoder.layers):
+                x = layer(x, src_key_padding_mask=padmask)  # [B,T,H]
+                if i in want:
+                    captured[want[i]] = x.detach().to("cpu")
 
         return captured

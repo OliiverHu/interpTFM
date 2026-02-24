@@ -7,24 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from io.activation_store import ActivationStore
-from sae.sae_base import SAESpec, SAEResult
-
-
-class AutoEncoder(nn.Module):
-    """
-    Minimal SAE: x -> enc -> relu -> dec
-    Keep it simple now; you can swap in your exact implementation later.
-    """
-    def __init__(self, d_in: int, n_latents: int):
-        super().__init__()
-        self.encoder = nn.Linear(d_in, n_latents, bias=False)
-        self.decoder = nn.Linear(n_latents, d_in, bias=False)
-
-    def forward(self, x: torch.Tensor):
-        z = F.relu(self.encoder(x))
-        x_hat = self.decoder(z)
-        return x_hat, z
+from interp_pipeline.io.activation_store import ActivationStore
+from interp_pipeline.sae.sae_base import SAESpec, SAEResult, AutoEncoder
 
 
 @dataclass
