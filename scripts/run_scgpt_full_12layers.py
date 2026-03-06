@@ -20,7 +20,6 @@ from interp_pipeline.sae.trainers import fit_sae_for_layer
 
 from interp_pipeline.get_annotation.panel import panel_from_cosmx_adata
 from interp_pipeline.get_annotation.gprofiler_client import GProfilerClient, GProfilerSpec
-
 from interp_pipeline.get_annotation.f1_alignment import heldout_report_for_layer
 
 
@@ -35,11 +34,10 @@ DEVICE = "cuda"
 
 # Activation extraction
 EXTRACT_CFG: Dict[str, Any] = {
-    "batch_size": 8,          # raise as GPU allows (e.g. 32/64)
+    "batch_size": 8,
     "max_length": 512,
     "model_name": "scgpt",
-    "max_shards": None,       # full data
-    # "target_tokens_per_shard": 12000,  # optional if your extractor supports it
+    "max_shards": None,  # full data
 }
 
 # g:Profiler GT
@@ -57,15 +55,16 @@ SAE_SPEC = SAESpec(
 )
 SAE_TRAIN_BATCH = 1024
 
-# Heldout evaluation (must match your “reported results” protocol)
+# Heldout evaluation thresholds (absolute Z > thr, like your debug script)
 LATENT_THRESHOLDS = [0.0, 0.15, 0.3, 0.6]
-VALID_FRAC = 0.10
-TEST_FRAC = 0.10
-SPLIT_SEED = 0
 
-TOPM_VALID_PER_CONCEPT_PER_THR = 200
-EVAL_BATCH_SIZE = 8192
-TP_DTYPE = np.int32
+# -----------------------
+# Dev-mode control
+# -----------------------
+DEV_ONLY_LAYER_INDEX = 4          # ONLY dev on the 5th layer in layers[:12]
+DEV_SHARD_FRACTION = 0.200        # e.g. 100% of shards
+DEV_MAX_ROWS_PER_SPLIT_PER_SHARD = 4096
+DEV_ONLY_VALID = True             # keep valid only in dev mode
 
 
 # -----------------------
@@ -218,6 +217,19 @@ def build_gprofiler_gt(
     return bin_path
 
 
+def _compute_dev_max_shards(store_root: str, layer: str, frac: float) -> int:
+    """
+    Uses the extracted activation shards on disk to pick a shard count by proportion.
+    """
+    acts_root = os.path.join(store_root, "activations", layer)
+    shards = [p for p in os.listdir(acts_root) if p.startswith("shard_")]
+    n = len(shards)
+    if n <= 0:
+        return 0
+    k = int(np.ceil(n * float(frac)))
+    return max(1, min(n, k))
+
+
 # -----------------------
 # Main
 # -----------------------
@@ -244,13 +256,19 @@ def main():
     if len(layers) < 12:
         raise RuntimeError(f"Expected >= 12 layers, got {len(layers)}")
     layers = layers[:12]
-    print("  layers:", layers)
+    print("  layers[:12] =", layers)
+    print(f"  DEV_ONLY_LAYER_INDEX={DEV_ONLY_LAYER_INDEX} -> dev layer will be: {layers[DEV_ONLY_LAYER_INDEX]}")
 
     # 2) Store
     store = ActivationStore(ActivationStoreSpec(root=OUT_ROOT))
 
-    for layer in layers:
-        print(f"\n=== LAYER: {layer} ===")
+    for li, layer in enumerate(layers):
+        print(f"\n=== LAYER {li}/11: {layer} ===")
+
+        is_dev_layer = (li == DEV_ONLY_LAYER_INDEX)
+        if not is_dev_layer:
+            print("dev mode, skipping layer")
+            continue
 
         # 2a) Extract activations (full data)
         print("[2a] Extract activations")
@@ -280,10 +298,20 @@ def main():
         sae_ckpt_path = res.model_path
         print("  SAE:", sae_ckpt_path)
 
-        # 2c) Heldout reporting (valid->test), with valid top-M filter
-        print("[2c] Heldout reporting (valid->test)")
+        # 2c) Heldout reporting
         heldout_out = os.path.join(OUT_ROOT, "heldout_report", layer)
         ensure_dir(heldout_out)
+
+        
+        dev_mode = bool(is_dev_layer)
+
+        dev_max_shards = None
+        if dev_mode:
+            dev_max_shards = _compute_dev_max_shards(OUT_ROOT, layer, DEV_SHARD_FRACTION)
+            print(f"[2c] Heldout reporting (DEV MODE) layer={layer}")
+            print(f"     dev shard fraction={DEV_SHARD_FRACTION} -> dev_max_shards={dev_max_shards}")
+        else:
+            print(f"[2c] Heldout reporting (FULL) layer={layer}")
 
         heldout_report_for_layer(
             layer=layer,
@@ -291,16 +319,16 @@ def main():
             gt_csv=gt_csv,
             sae_ckpt_path=sae_ckpt_path,
             out_dir=heldout_out,
-            latent_thresholds=[0.0, 0.15, 0.3, 0.6],
+            latent_thresholds=LATENT_THRESHOLDS,
             adata_path=ADATA_PATH,
             scgpt_ckpt=SCGPT_CKPT,
-            dev_mode=True,
-            dev_max_shards=50,
-            dev_max_rows_per_split_per_shard=4096,
-            dev_only_valid=True,
+            dev_mode=dev_mode,
+            dev_max_shards=dev_max_shards,
+            dev_max_rows_per_split_per_shard=DEV_MAX_ROWS_PER_SPLIT_PER_SHARD if dev_mode else None,
+            dev_only_valid=DEV_ONLY_VALID if dev_mode else False,
         )
 
-    print("\nDONE: scGPT 12-layer full pipeline complete.")
+    print("\nDONE: scGPT 12-layer pipeline complete.")
 
 
 if __name__ == "__main__":
