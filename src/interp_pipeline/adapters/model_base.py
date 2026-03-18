@@ -56,3 +56,20 @@ class ModelAdapter(ABC):
         For cell-level layers:  Tensor[B, H]
         """
         ...
+
+    @abstractmethod
+    def process_captured(
+        self,
+        captured: Dict[str, Any],
+        batch: Dict[str, Any],
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Convert raw captured activations into buffer-ready entries.
+        Returns: layer_name -> {
+            "acts": Tensor[N, H],   # flattened tokens
+            "tok":  List[str],      # token ids, length N
+            "ex":   List[str],      # cell ids expanded to tokens, length N
+            "token_unit": str,
+        }
+        """
+        ...
