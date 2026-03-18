@@ -63,22 +63,6 @@ def extract_activations(
     global_example_ids: List[str] = []
     global_token_ids: List[str] = []
 
-    # Helper: get token ids from batch (supports scgpt_local and older scGPT)
-    def _get_token_ids(batch: Dict[str, Any], B: int, T: int) -> List[str]:
-        tok = None
-        if "genes" in batch:
-            tok = batch["genes"]  # [B,T]
-        elif "gene_ids" in batch:
-            tok = batch["gene_ids"]  # [B,T]
-
-        if isinstance(tok, torch.Tensor):
-            tok = tok.to("cpu").reshape(B * T).tolist()
-
-        if tok is None:
-            tok = list(range(B * T))
-
-        return [str(x) for x in tok]
-
     # Helper: flush a layer buffer as one shard
     def _flush_layer(layer_name: str) -> None:
         nonlocal shard_id
@@ -116,7 +100,6 @@ def extract_activations(
             layers=layers,
             capture_cfg=extraction_cfg,
         )
-        cell_ids = batch["cell_ids"]  # list[str], length B
 
         # Some adapters might return empty dict if capture fails; make that obvious.
         if not captured:
@@ -125,52 +108,33 @@ def extract_activations(
                 "This usually means the capture mechanism isn't working for this model."
             )
 
-        # Determine budget once we see first tensor shape (B,T,H) for any layer.
-        if (not computed_budget) and (target_tokens_per_shard is None):
-            # pick first captured layer
-            any_layer = next(iter(captured))
-            acts_btH = captured[any_layer]
-            if acts_btH.ndim != 3:
-                raise ValueError(f"{any_layer}: expected [B,T,H], got shape={acts_btH.shape}")
-            B0, T0, _ = acts_btH.shape
+        buf_entries = model_adapter.process_captured(captured, batch)
 
-            # estimate total tokens = n_obs * T0
+        # Determine budget once from the first batch's actual token count.
+        if (not computed_budget) and (target_tokens_per_shard is None):
+            any_entry = buf_entries[next(iter(buf_entries))]
+            T_list = any_entry["T_list"]
+            T0 = sum(T_list) / max(1, len(T_list))
+            # T0 = max(T_list)
+
             n_obs = int(getattr(dataset.adata, "n_obs", len(dataset.adata.obs_names)))
             total_tokens_est = n_obs * T0
 
-            # budget so that <= max_shards
-            # +1 guard to avoid tiny budgets; also avoid zero
             denom = max(1, int(max_shards) if max_shards is not None else 512)
             target_tokens_per_shard = max(1, int(math.ceil(total_tokens_est / denom)))
 
             computed_budget = True
-            # print a small hint once
-            print(f"[extractor] auto target_tokens_per_shard={target_tokens_per_shard} (T≈{T0}, n_obs={n_obs}, max_shards={max_shards})")
+            print(f"[extractor] auto target_tokens_per_shard={target_tokens_per_shard} (T≈{T0:.1f}, n_obs={n_obs}, max_shards={max_shards})")
 
-        for layer_name, acts_btH in captured.items():
-            token_unit = model_adapter.infer_token_unit(layer_name)
-
-            if acts_btH.ndim != 3:
-                raise ValueError(f"{layer_name}: expected [B,T,H] for token-level capture, got shape={acts_btH.shape}")
-
-            B, T, H = acts_btH.shape
-            flat = acts_btH.reshape(B * T, H).contiguous()
-
-            tok_list = _get_token_ids(batch, B, T)
-
-            # Expand example ids to token occurrences
-            ex_list: List[str] = []
-            for cid in cell_ids:
-                ex_list.extend([str(cid)] * T)
-
+        for layer_name, entry in buf_entries.items():
             b = buf[layer_name]
             if b["token_unit"] is None:
-                b["token_unit"] = token_unit
+                b["token_unit"] = entry["token_unit"]
 
-            b["acts"].append(flat)
-            b["tok"].extend(tok_list)
-            b["ex"].extend(ex_list)
-            b["n"] += flat.shape[0]
+            b["acts"].append(entry["acts"])
+            b["tok"].extend(entry["tok"])
+            b["ex"].extend(entry["ex"])
+            b["n"] += entry["acts"].shape[0]
 
             if layer_name not in extracted_layers:
                 extracted_layers.append(layer_name)
