@@ -113,18 +113,18 @@ def extract_activations(
         # Determine budget once from the first batch's actual token count.
         if (not computed_budget) and (target_tokens_per_shard is None):
             any_entry = buf_entries[next(iter(buf_entries))]
-            tokens_in_batch = any_entry["acts"].shape[0]   # B*T (real tokens this batch)
-            cell_ids = batch["cell_ids"]  # list[str], length B
-            T0_avg = tokens_in_batch / max(1, len(cell_ids))
+            T_list = any_entry["T_list"]
+            T0 = sum(T_list) / max(1, len(T_list))
+            # T0 = max(T_list)
 
             n_obs = int(getattr(dataset.adata, "n_obs", len(dataset.adata.obs_names)))
-            total_tokens_est = n_obs * T0_avg
+            total_tokens_est = n_obs * T0
 
             denom = max(1, int(max_shards) if max_shards is not None else 512)
             target_tokens_per_shard = max(1, int(math.ceil(total_tokens_est / denom)))
 
             computed_budget = True
-            print(f"[extractor] auto target_tokens_per_shard={target_tokens_per_shard} (T_avg≈{T0_avg:.1f}, n_obs={n_obs}, max_shards={max_shards})")
+            print(f"[extractor] auto target_tokens_per_shard={target_tokens_per_shard} (T≈{T0:.1f}, n_obs={n_obs}, max_shards={max_shards})")
 
         for layer_name, entry in buf_entries.items():
             b = buf[layer_name]

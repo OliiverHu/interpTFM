@@ -124,27 +124,27 @@ class ScGPTAdapter(ModelAdapter):
         expressions = batch["expressions"].to(device)      # [B,T]
         padmask = batch["src_key_padding_mask"].to(device) # [B,T] bool
 
-        # captured: Dict[str, torch.Tensor] = {}
-        # layer_idxs = sorted([int(lname.split("_")[1]) for lname in layers])
-        # with torch.no_grad(), model.trace(genes, expressions, padmask):
-        #     for layer, idx in zip(layers, layer_idxs):
-        #         captured[layer] = model.transformer_encoder.layers[idx].output.save()
+        captured: Dict[str, torch.Tensor] = {}
+        layer_idxs = sorted([int(lname.split("_")[1]) for lname in layers])
+        with torch.no_grad(), model.trace(genes, expressions, padmask):
+            for layer, idx in zip(layers, layer_idxs):
+                captured[layer] = model.transformer_encoder.layers[idx].output.save()
 
         # Build input embeddings as model.forward does
-        x = model.encoder(genes) + model.value_encoder(expressions)  # [B,T,H]
+        # x = model.encoder(genes) + model.value_encoder(expressions)  # [B,T,H]
 
-        # Parse which layer indices we want
-        want = {}
-        for lname in layers:
-            idx = int(lname.split("_")[1])
-            want[idx] = lname
+        # # Parse which layer indices we want
+        # want = {}
+        # for lname in layers:
+        #     idx = int(lname.split("_")[1])
+        #     want[idx] = lname
 
-        captured: Dict[str, torch.Tensor] = {}
-        with torch.no_grad():
-            for i, layer in enumerate(model.transformer_encoder.layers):
-                x = layer(x, src_key_padding_mask=padmask)  # [B,T,H]
-                if i in want:
-                    captured[want[i]] = x.detach().to("cpu")
+        # captured: Dict[str, torch.Tensor] = {}
+        # with torch.no_grad():
+        #     for i, layer in enumerate(model.transformer_encoder.layers):
+        #         x = layer(x, src_key_padding_mask=padmask)  # [B,T,H]
+        #         if i in want:
+        #             captured[want[i]] = x.detach().to("cpu")
 
         return captured
 
@@ -159,24 +159,59 @@ class ScGPTAdapter(ModelAdapter):
         """
         genes: torch.Tensor = batch["genes"].to("cpu")   # [B, T]
         cell_ids = batch["cell_ids"]
-        B, T = genes.shape
+        padmask = batch["src_key_padding_mask"].to("cpu")  # [B, T] bool, True=padding
 
-        tok_list = genes.reshape(B * T).tolist()
-        tok_list = [str(x) for x in tok_list]
+        # real token count per cell from padding mask
+        T_list: List[int] = (~padmask).sum(dim=1).tolist()
+        tok_list = [str(x) for x in genes[~padmask].tolist()]
+
 
         ex_list: List[str] = []
-        for cid in cell_ids:
-            ex_list.extend([str(cid)] * T)
+        for cid, t in zip(cell_ids, T_list):
+            ex_list.extend([str(cid)] * t)
 
         result: Dict[str, Dict[str, Any]] = {}
         for layer_name, acts_btH in captured.items():
-            flat = acts_btH.reshape(B * T, acts_btH.shape[-1]).contiguous()
+            flat = torch.cat(acts_btH.unbind(), dim=0)   # nested [B, T_i, H] -> [N, H]
+            
             result[layer_name] = {
                 "acts": flat,
                 "tok": tok_list,
                 "ex": ex_list,
                 "token_unit": self.infer_token_unit(layer_name),
+                "T_list": T_list,   # include T_list for potential downstream use
             }
         return result
+
+    # def process_captured(
+    #     self,
+    #     captured: Dict[str, Any],
+    #     batch: Dict[str, Any],
+    # ) -> Dict[str, Dict[str, Any]]:
+    #     """
+    #     Convert raw captured activations into buffer-ready entries.
+    #     Handles token id extraction and flattening of [B, T, H] -> [B*T, H].
+    #     """
+    #     genes: torch.Tensor = batch["genes"].to("cpu")   # [B, T]
+    #     cell_ids = batch["cell_ids"]
+    #     B, T = genes.shape
+
+    #     tok_list = genes.reshape(B * T).tolist()
+    #     tok_list = [str(x) for x in tok_list]
+
+    #     ex_list: List[str] = []
+    #     for cid in cell_ids:
+    #         ex_list.extend([str(cid)] * T)
+
+    #     result: Dict[str, Dict[str, Any]] = {}
+    #     for layer_name, acts_btH in captured.items():
+    #         flat = acts_btH.reshape(B * T, acts_btH.shape[-1]).contiguous()
+    #         result[layer_name] = {
+    #             "acts": flat,
+    #             "tok": tok_list,
+    #             "ex": ex_list,
+    #             "token_unit": self.infer_token_unit(layer_name),
+    #         }
+    #     return result
 
 

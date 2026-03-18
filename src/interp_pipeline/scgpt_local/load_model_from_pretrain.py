@@ -2,6 +2,8 @@
 import os
 import torch
 
+from nnsight import NNsight
+
 from .model import scGPTModelClean, scGPTConfig
 from .tokenizer import Tokenizer
 from .util import load_pretrained
@@ -22,7 +24,7 @@ def create_clean_model_from_pretrain(model_dir, device="cpu"):
 
     tokenizer = Tokenizer(os.path.join(model_dir, "vocab.json"), device=device)
 
-    return scgptmodel, tokenizer
+    return NNsight(scgptmodel), tokenizer
 
 # %%
 if MAIN:
