@@ -49,25 +49,7 @@ class C2SScaleAdapter(ModelAdapter):
         )
         processor = C2SProcessor(max_genes=max_genes)
         return C2SHandle(model=model, tokenizer=tokenizer, processor=processor, device=device)
-    
-    def _unwrap_base_model(self, model_handle: C2SHandle):
-        lm = model_handle.model
-        return getattr(lm, "_model", lm)
-
-    def _get_transformer_layers(self, model_handle: C2SHandle):
-        base = self._unwrap_base_model(model_handle)
-
-        if hasattr(base, "gpt_neox") and hasattr(base.gpt_neox, "layers"):
-            return base.gpt_neox.layers, "gpt_neox"
-
-        if hasattr(base, "model") and hasattr(base.model, "layers"):
-            return base.model.layers, "model.layers"
-
-        raise ValueError(
-            f"Unsupported model architecture: {type(base)}. "
-            "Expected either base.gpt_neox.layers or base.model.layers."
-        )
-    
+        
     def _get_traceable_transformer_layers(self, model_handle: C2SHandle):
         """
         Resolve the transformer block list from the NNsight-wrapped model object,
@@ -83,23 +65,12 @@ class C2SScaleAdapter(ModelAdapter):
         if hasattr(lm, "model") and hasattr(lm.model, "layers"):
             return lm.model.layers, "model.layers"
 
-        # Some wrappers may keep the HF model at _model, but this usually won't
-        # expose NNsight proxy attributes. Keep as fallback only.
-        if hasattr(lm, "_model"):
-            base = lm._model
-            if hasattr(base, "gpt_neox") and hasattr(base.gpt_neox, "layers"):
-                return base.gpt_neox.layers, "_model.gpt_neox"
-            if hasattr(base, "model") and hasattr(base.model, "layers"):
-                return base.model.layers, "_model.model.layers"
-
         raise ValueError(
             f"Could not resolve traceable transformer layers from wrapped model type {type(lm)}"
         )
 
     def list_layers(self, model_handle: C2SHandle) -> List[str]:
-        layers, layer_family = self._get_transformer_layers(model_handle)
-        n = len(layers)
-        print(f"[C2SScaleAdapter] detected layer stack: {layer_family} ({n} layers)")
+        n = int(model_handle.model._model.config.num_hidden_layers)
         return [f"layer_{i}" for i in range(n)]
 
     def infer_token_unit(self, layer_name: str) -> TokenUnit:

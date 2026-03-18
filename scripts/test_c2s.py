@@ -29,6 +29,19 @@ spec = ModelSpec(
     options={"cache_dir": CACHE_DIR}
 )
 
+# MAX_GENES = 256
+# model_path = "/maiziezhou_lab2/yunfei/Projects/interpTFM-legacy/c2sscale/models/C2S-Scale-Gemma-2-2B"
+# spec = ModelSpec(
+#     name="c2s-scale",
+#     checkpoint=model_path,
+#     device="cuda:0",
+#     options={
+#         "max_genes": MAX_GENES,
+#         "cache_dir": None,
+#     },
+# )
+
+
 adapter = C2SScaleAdapter()
 handle = adapter.load(spec)
 
