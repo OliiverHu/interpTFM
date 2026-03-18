@@ -144,7 +144,7 @@ if __name__ == "__main__":
         pooling="last",
         save_dtype="fp16",
         pool_dtype="fp32",
-        normalize=True,
+        normalize=False,
         cache_dir=None,
     )
 
