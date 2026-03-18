@@ -84,6 +84,13 @@ class C2SScaleAdapter(ModelAdapter):
 
         # Build vocabulary once from the full dataset
         processor = model_handle.processor
+
+        # ----- additional for cosmx_human_lung_sec8.h5ad ----- #
+        adata.obs["cell_type"] = adata.obs["author_cell_type"]
+        adata.obs["cell_name"] = adata.obs_names
+        adata.var_names = adata.var["feature_name"].astype(str).values
+        # ----- ----- ----- ----- ----- ----- ----- ----- ----- #
+
         processor.normalize_adata(adata) if normalize else None
         
         arrow_dataset, _ = processor.adata_to_arrow(adata)
@@ -93,12 +100,13 @@ class C2SScaleAdapter(ModelAdapter):
             end = min(start + batch_size, n)
             arrow_dataset_batch = arrow_dataset.select(range(start, end))
             formatted_hf_ds_batch = formatted_hf_ds.select(range(start, end))
-            cell_ids = list(arrow_dataset_batch["cell_type"])
+            cell_ids = [str(x) for x in adata.obs_names[start:end]]
             batch_input = list(formatted_hf_ds_batch["model_input"])
             tokenized = model_handle.tokenizer(batch_input)
 
             yield {
                 "cell_ids": cell_ids,
+                "cell_sentences": list(arrow_dataset_batch["cell_sentence"]),
                 "batch_input": batch_input,
                 "tokenized": tokenized,
             }
