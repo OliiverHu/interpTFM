@@ -111,7 +111,7 @@ class C2SScaleAdapter(ModelAdapter):
         dataset: StandardDataset,
         model_handle: C2SHandle,
         batch_size: int,
-        max_length: int,
+        max_genes: int,
         normalize: bool = True,
     ) -> Iterable[Dict[str, Any]]:
         """
@@ -137,7 +137,7 @@ class C2SScaleAdapter(ModelAdapter):
             processor.normalize_adata(adata)
 
         arrow_dataset, _ = processor.adata_to_arrow(adata)
-        formatted_hf_ds = processor.prompts_generation(arrow_dataset, n_genes=max_length)
+        formatted_hf_ds = processor.prompts_generation(arrow_dataset, n_genes=max_genes)
 
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
@@ -208,13 +208,15 @@ class C2SScaleAdapter(ModelAdapter):
 
         Returns:
             {
-            layer_name: {
-                "acts": Tensor[N_genes_kept, H],
-                "tok": List[str],              # gene names
-                "ex": List[str],               # cell ids
-                "token_unit": "gene",
-            },
-            ...
+                layer_name: {
+                    "acts": Tensor[N_genes_kept, H],
+                    "tok": List[str],              # gene names
+                    "ex": List[str],               # cell ids aligned to acts
+                    "cell_acts": Tensor[N_cells_kept, H],
+                    "cell_ids": List[str],         # aligned to cell_acts
+                    "token_unit": "gene",
+                },
+                ...
             }
         """
         tokenized = batch["tokenized"]
@@ -229,28 +231,18 @@ class C2SScaleAdapter(ModelAdapter):
         if not isinstance(attention_mask, torch.Tensor):
             raise ValueError("tokenized['attention_mask'] must be a torch.Tensor")
 
-        # number of real tokens per sample (ignores left padding)
         seq_lens = attention_mask.sum(dim=1).tolist()
-
         processed: Dict[str, Dict[str, Any]] = {}
 
         for layer_name, layer_out in captured.items():
             hs = layer_out
-
-            # unwrap nnsight saved object if needed
             if hasattr(hs, "value"):
                 hs = hs.value
-
-            # many decoder layers return tuples; first element is hidden states [B, T, H]
             if isinstance(hs, (tuple, list)):
                 hs = hs[0]
-
             if not isinstance(hs, torch.Tensor):
-                raise TypeError(
-                    f"{layer_name} is not a tensor after unwrapping; got {type(hs)}"
-                )
+                raise TypeError(f"{layer_name} is not a tensor after unwrapping; got {type(hs)}")
 
-            # [B, T_padded, H]
             hs_cpu = hs.detach().to("cpu")
 
             if pool_dtype == "fp32":
@@ -266,18 +258,19 @@ class C2SScaleAdapter(ModelAdapter):
             tok: List[str] = []
             ex: List[str] = []
 
+            per_cell_vecs: List[torch.Tensor] = []
+            per_cell_ids: List[str] = []
+
             for sample_idx, cell_id in enumerate(cell_ids):
                 seq_len = int(seq_lens[sample_idx])
-
-                # left-padding offset
                 pad_len = padded_seq_len - seq_len
 
+                cell_gene_vecs: List[torch.Tensor] = []
+
                 for gene, start_tok, end_tok in gene_spans[sample_idx]:
-                    # span validity in the ORIGINAL unpadded sequence
                     if end_tok > seq_len:
                         continue
 
-                    # shift into padded coordinates
                     start_tok_shifted = start_tok + pad_len
                     end_tok_shifted = end_tok + pad_len
 
@@ -294,16 +287,30 @@ class C2SScaleAdapter(ModelAdapter):
                     else:
                         raise ValueError(f"Unknown pooling={pooling}")
 
+                    # keep an fp32 copy for stable cell averaging before save cast
+                    cell_gene_vecs.append(vec.float())
+
                     if save_dtype == "fp16":
-                        vec = vec.half()
+                        vec_to_store = vec.half()
                     elif save_dtype == "fp32":
-                        vec = vec.float()
+                        vec_to_store = vec.float()
                     else:
                         raise ValueError(f"save_dtype must be 'fp16' or 'fp32', got {save_dtype}")
 
-                    pooled_rows.append(vec)
+                    pooled_rows.append(vec_to_store)
                     tok.append(gene)
                     ex.append(cell_id)
+
+                # mean over this cell's kept gene vectors
+                if cell_gene_vecs:
+                    cell_vec = torch.stack(cell_gene_vecs, dim=0).mean(dim=0)
+                    if save_dtype == "fp16":
+                        cell_vec = cell_vec.half()
+                    elif save_dtype == "fp32":
+                        cell_vec = cell_vec.float()
+
+                    per_cell_vecs.append(cell_vec)
+                    per_cell_ids.append(cell_id)
 
             if pooled_rows:
                 acts = torch.stack(pooled_rows, dim=0)
@@ -312,10 +319,19 @@ class C2SScaleAdapter(ModelAdapter):
                 dtype = torch.float16 if save_dtype == "fp16" else torch.float32
                 acts = torch.empty((0, hidden_size), dtype=dtype)
 
+            if per_cell_vecs:
+                cell_acts = torch.stack(per_cell_vecs, dim=0)
+            else:
+                hidden_size = hs_cpu.shape[-1]
+                dtype = torch.float16 if save_dtype == "fp16" else torch.float32
+                cell_acts = torch.empty((0, hidden_size), dtype=dtype)
+
             processed[layer_name] = {
                 "acts": acts,
                 "tok": tok,
                 "ex": ex,
+                "cell_acts": cell_acts,
+                "cell_ids": per_cell_ids,
                 "token_unit": "gene",
             }
 

@@ -1,17 +1,21 @@
 from pathlib import Path
+import shutil
+
 import numpy as np
 import scanpy as sc
 import scipy.sparse as sp
-import torch
 
 from interp_pipeline.adapters.models.c2s_scale import C2SScaleAdapter
 from interp_pipeline.adapters.model_base import ModelSpec
 from interp_pipeline.types.dataset import StandardDataset
+from interp_pipeline.extraction.c2s_extraction import extract_c2s_shard
+
 
 if __name__ == "__main__":
     model_path = "/maiziezhou_lab2/yunfei/Projects/interpTFM-legacy/c2sscale/models/C2S-Scale-Gemma-2-2B"
     LAYERS = ["layer_0", "layer_6", "layer_13"]
     BATCH_SIZE = 4
+    MAX_GENES = 256
 
     p = Path("/maiziezhou_lab2/yunfei/Projects/FM_temp/InterPLM/interplm/ge_shards/cosmx_human_lung_sec8.h5ad")
 
@@ -44,7 +48,7 @@ if __name__ == "__main__":
         checkpoint=model_path,
         device="cuda:0",
         options={
-            "max_genes": 256,
+            "max_genes": MAX_GENES,
             "cache_dir": None,
         },
     )
@@ -54,11 +58,14 @@ if __name__ == "__main__":
 
     print("Detected layers:", adapter.list_layers(handle)[:5], "...")
 
+    # ------------------------------------------------------------------
+    # 1) Adapter-level smoke test (same as before, with cell-level outputs)
+    # ------------------------------------------------------------------
     for batch in adapter.make_batches(
         dataset=dataset,
         model_handle=handle,
         batch_size=BATCH_SIZE,
-        max_length=256,   # currently acting like n_genes in your adapter path
+        max_genes=MAX_GENES,
         normalize=True,
     ):
         batch["pooling"] = "last"
@@ -98,18 +105,61 @@ if __name__ == "__main__":
             acts = out["acts"]
             tok = out["tok"]
             ex = out["ex"]
-            token_unit = out["token_unit"]
+            cell_acts = out["cell_acts"]
+            cell_ids = out["cell_ids"]
 
             print(f"\n[{layer_name}]")
-            print("  acts shape:", acts.shape)
+            print("  gene acts shape:", acts.shape)
             print("  len(tok):", len(tok))
             print("  len(ex):", len(ex))
-            print("  token_unit:", token_unit)
+            print("  cell acts shape:", cell_acts.shape)
+            print("  len(cell_ids):", len(cell_ids))
             print("  first 5 genes:", tok[:5])
-            print("  first 5 cell ids:", ex[:5])
+            print("  first 5 gene cell ids:", ex[:5])
+            print("  first 5 cell ids:", cell_ids[:5])
 
-            assert acts.shape[0] == len(tok), f"{layer_name}: acts/tok mismatch"
-            assert acts.shape[0] == len(ex), f"{layer_name}: acts/ex mismatch"
+            assert acts.shape[0] == len(tok)
+            assert acts.shape[0] == len(ex)
+            assert cell_acts.shape[0] == len(cell_ids)
 
-        print("\nSmoke test passed for first batch.")
+        print("\nAdapter-level smoke test passed for first batch.")
         break
+
+    # ------------------------------------------------------------------
+    # 2) New c2s_extraction API smoke test
+    # ------------------------------------------------------------------
+    output_dir = Path("/tmp/c2s_extraction_smoke")
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+
+    extract_c2s_shard(
+        adata=subset,
+        model_path=model_path,
+        output_dir=str(output_dir),
+        layers=LAYERS,
+        shard=0,
+        batch_size=BATCH_SIZE,
+        max_genes=MAX_GENES,
+        device="cuda:0",
+        pooling="last",
+        save_dtype="fp16",
+        pool_dtype="fp32",
+        normalize=True,
+        cache_dir=None,
+    )
+
+    print("\nExtraction API smoke test finished. Checking saved files...")
+
+    expected_files = [
+        output_dir / "metadata" / "shard_0.json",
+        output_dir / "activations" / "layer_0" / "shard_0" / "batch_00000_gene_acts.pt",
+        output_dir / "activations" / "layer_0" / "shard_0" / "batch_00000_cell_gene_pairs.txt",
+        output_dir / "cell_activations" / "layer_0" / "shard_0" / "batch_00000_cell_acts.pt",
+        output_dir / "cell_activations" / "layer_0" / "shard_0" / "batch_00000_cell_ids.txt",
+    ]
+
+    for fp in expected_files:
+        print(f"  exists? {fp}: {fp.exists()}")
+        assert fp.exists(), f"Missing expected output file: {fp}"
+
+    print("\nC2S extraction API smoke test passed.")
