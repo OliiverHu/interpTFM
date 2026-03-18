@@ -117,11 +117,12 @@ class C2SScaleAdapter(ModelAdapter):
         """
         Create batches from dataset by converting expression to cell sentences.
 
-        Required output keys for extractor:
-        - cell_ids: list[str] length B
-        - tokenized: tokenizer output with input_ids / attention_mask
-        - genes_ranked: list[list[str]] one ranked gene list per sample
-        - gene_spans: list[list[(gene, start, end)]] per sample, pre-truncation
+        Output keys:
+        - cell_ids
+        - batch_input
+        - tokenized
+        - genes_ranked
+        - gene_spans
         """
         adata = dataset.adata
         n = adata.n_obs
@@ -139,25 +140,26 @@ class C2SScaleAdapter(ModelAdapter):
         arrow_dataset, _ = processor.adata_to_arrow(adata)
         formatted_hf_ds = processor.prompts_generation(arrow_dataset, n_genes=max_genes)
 
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
+        n_formatted = len(formatted_hf_ds)
 
-            arrow_dataset_batch = arrow_dataset.select(range(start, end))
-            formatted_hf_ds_batch = formatted_hf_ds.select(range(start, end))
+        for start in range(0, n_formatted, batch_size):
+            end = min(start + batch_size, n_formatted)
 
-            cell_ids = [str(x) for x in adata.obs_names[start:end]]
-            batch_input = list(formatted_hf_ds_batch["model_input"])
-            cell_sentences = list(arrow_dataset_batch["cell_sentence"])
+            arrow_batch = arrow_dataset.select(range(start, end))
+            formatted_batch = formatted_hf_ds.select(range(start, end))
 
+            # Prefer preserved cell_name if available
+            if "cell_name" in arrow_batch.column_names:
+                cell_ids = [str(x) for x in arrow_batch["cell_name"]]
+            else:
+                cell_ids = [str(x) for x in adata.obs_names[start:end]]
+
+            batch_input = list(formatted_batch["model_input"])
             tokenized = model_handle.tokenizer(batch_input)
 
-            # Recover ranked genes from cell_sentence.
-            # Assumes cell_sentence is the ordered gene sequence separated by spaces.
-            genes_ranked: List[List[str]] = [
-                str(sentence).split() for sentence in cell_sentences
-            ]
+            genes_ranked = [extract_genes_from_prompt(prompt) for prompt in batch_input]
 
-            gene_spans: List[List[Tuple[str, int, int]]] = []
+            gene_spans = []
             for prompt, genes_this_cell in zip(batch_input, genes_ranked):
                 spans = build_prompt_and_spans_from_rendered_prompt(
                     tokenizer=model_handle.tokenizer,
@@ -168,11 +170,10 @@ class C2SScaleAdapter(ModelAdapter):
 
             yield {
                 "cell_ids": cell_ids,
-                "cell_sentences": cell_sentences,
                 "batch_input": batch_input,
                 "tokenized": tokenized,
                 "genes_ranked": genes_ranked,
-                "gene_spans": gene_spans,   # pre-truncation spans
+                "gene_spans": gene_spans,
             }
 
     def forward_and_capture(
@@ -380,3 +381,31 @@ def build_prompt_and_spans_from_rendered_prompt(
         cursor = pos + len(gid)
 
     return spans
+
+
+def extract_genes_from_prompt(prompt: str) -> List[str]:
+    """
+    Recover the gene sequence that actually appears in the rendered prompt.
+    """
+    marker = "Cell sentence:"
+    if marker not in prompt:
+        raise RuntimeError(f"Could not find '{marker}' in prompt:\n{prompt}")
+
+    tail = prompt.split(marker, 1)[1].strip()
+
+    stop_markers = [
+        "The cell type corresponding to these genes is:",
+        "The cell type corresponding to this cell is:",
+    ]
+    for stop in stop_markers:
+        if stop in tail:
+            tail = tail.split(stop, 1)[0].strip()
+
+    if tail.endswith("."):
+        tail = tail[:-1].strip()
+
+    genes = tail.split()
+    if not genes:
+        raise RuntimeError(f"No genes parsed from prompt:\n{prompt}")
+
+    return genes
