@@ -70,7 +70,7 @@ class C2SProcessor:
     def adata_to_arrow(self,
             adata,
             sentence_delimiter: str = ' ',
-            label_col_names: list = None, 
+            label_col_names: list = ["cell_type", "organism"], 
     ):
         """
         Build the gene vocabulary from a (full) AnnData object.

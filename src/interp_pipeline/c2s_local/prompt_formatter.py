@@ -132,7 +132,8 @@ class C2SPromptFormatter(PromptFormatter):
             sample["num_genes"] = num_genes_str
 
             # Select an input prompt, format keys
-            model_input_str = random.choice(self.prompts_dict["model_input"])
+            # model_input_str = random.choice(self.prompts_dict["model_input"])
+            model_input_str = self.prompts_dict["model_input"][0]  # 1st prompt template per task
             model_input_str = model_input_str.format(**{key: sample[key] for key in model_input_keys})
             
             # Format key in response
