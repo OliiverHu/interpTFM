@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict
 
 
@@ -9,8 +9,8 @@ class StandardDataset:
     Thin wrapper around AnnData (or AnnData-like).
     Keeps dataset + obs-key mapping consistent across pipeline stages.
     """
-    adata: Any  # anndata.AnnData
-    obs_key_map: Dict[str, str]
+    adata: Any
+    obs_key_map: Dict[str, str] = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.adata is None:
