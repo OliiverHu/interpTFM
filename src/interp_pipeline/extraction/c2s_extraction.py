@@ -28,7 +28,6 @@ def save_processed_batch_c2s(
     for layer_name, out in processed.items():
         layer_num = int(layer_name.split("_")[1])
 
-        # gene-level
         gene_out_dir = output_dir / "activations" / f"layer_{layer_num}" / f"shard_{shard}"
         gene_out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -38,7 +37,6 @@ def save_processed_batch_c2s(
             for cell_id, gene in zip(out["ex"], out["tok"]):
                 f.write(f"{cell_id}\t{gene}\n")
 
-        # cell-level
         if "cell_acts" in out and "cell_ids" in out:
             cell_out_dir = output_dir / "cell_activations" / f"layer_{layer_num}" / f"shard_{shard}"
             cell_out_dir.mkdir(parents=True, exist_ok=True)
@@ -110,7 +108,14 @@ def extract_c2s_shard(
         normalize=normalize,
     )
 
-    for batch_idx, batch in enumerate(tqdm(batch_iter, desc=f"Shard {shard} extracting")):
+    desc = f"extract:c2sscale:shard_{shard}"
+    total_batches = None
+    try:
+        total_batches = len(batch_iter)
+    except Exception:
+        total_batches = None
+
+    for batch_idx, batch in enumerate(tqdm(batch_iter, total=total_batches, desc=desc)):
         batch["pooling"] = pooling
         batch["save_dtype"] = save_dtype
         batch["pool_dtype"] = pool_dtype
@@ -163,7 +168,7 @@ def extract_c2s_dataset(
 
     for s in range(shards):
         subset = adata[adata.obs[shard_key] == f"shard_{s}"].copy()
-        print(f"\nProcessing shard_{s}: {subset.n_obs} cells")
+        print(f"\n[c2s_scale] processing shard_{s}: {subset.n_obs} cells")
 
         if subset.n_obs == 0:
             continue

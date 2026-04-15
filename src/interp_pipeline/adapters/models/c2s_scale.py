@@ -57,11 +57,9 @@ class C2SScaleAdapter(ModelAdapter):
         """
         lm = model_handle.model
 
-        # GPT-NeoX / Pythia path on wrapped model
         if hasattr(lm, "gpt_neox") and hasattr(lm.gpt_neox, "layers"):
             return lm.gpt_neox.layers, "gpt_neox"
 
-        # Gemma / Llama-like wrapped path
         if hasattr(lm, "model") and hasattr(lm.model, "layers"):
             return lm.model.layers, "model.layers"
 
@@ -74,7 +72,6 @@ class C2SScaleAdapter(ModelAdapter):
         return [f"layer_{i}" for i in range(n)]
 
     def infer_token_unit(self, layer_name: str) -> TokenUnit:
-        # currently only initialized with "gene"
         return "gene"
 
     def make_batches(
@@ -119,7 +116,6 @@ class C2SScaleAdapter(ModelAdapter):
             arrow_batch = arrow_dataset.select(range(start, end))
             formatted_batch = formatted_hf_ds.select(range(start, end))
 
-            # Prefer preserved cell_name if available
             if "cell_name" in arrow_batch.column_names:
                 cell_ids = [str(x) for x in arrow_batch["cell_name"]]
             else:
@@ -162,7 +158,9 @@ class C2SScaleAdapter(ModelAdapter):
         layer_idxs = [int(lname.split("_")[1]) for lname in layers]
 
         transformer_layers, layer_family = self._get_traceable_transformer_layers(model_handle)
-        print(f"[C2SScaleAdapter] tracing layer stack: {layer_family}")
+        if not getattr(self, "_printed_trace_stack", False):
+            print(f"[C2SScaleAdapter] tracing layer stack: {layer_family}")
+            self._printed_trace_stack = True
 
         with torch.no_grad(), model_handle.model.trace(batch["tokenized"]):
             for layer_name, idx in zip(layers, layer_idxs):
@@ -182,10 +180,10 @@ class C2SScaleAdapter(ModelAdapter):
             {
                 layer_name: {
                     "acts": Tensor[N_genes_kept, H],
-                    "tok": List[str],              # gene names
-                    "ex": List[str],               # cell ids aligned to acts
+                    "tok": List[str],
+                    "ex": List[str],
                     "cell_acts": Tensor[N_cells_kept, H],
-                    "cell_ids": List[str],         # aligned to cell_acts
+                    "cell_ids": List[str],
                     "token_unit": "gene",
                 },
                 ...
@@ -259,7 +257,6 @@ class C2SScaleAdapter(ModelAdapter):
                     else:
                         raise ValueError(f"Unknown pooling={pooling}")
 
-                    # keep an fp32 copy for stable cell averaging before save cast
                     cell_gene_vecs.append(vec.float())
 
                     if save_dtype == "fp16":
@@ -273,7 +270,6 @@ class C2SScaleAdapter(ModelAdapter):
                     tok.append(gene)
                     ex.append(cell_id)
 
-                # mean over this cell's kept gene vectors
                 if cell_gene_vecs:
                     cell_vec = torch.stack(cell_gene_vecs, dim=0).mean(dim=0)
                     if save_dtype == "fp16":
