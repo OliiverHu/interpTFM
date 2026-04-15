@@ -10,9 +10,9 @@ from interp_pipeline.adapters.model_base import ModelAdapter, ModelSpec
 from interp_pipeline.types.activations import TokenUnit
 from interp_pipeline.types.dataset import StandardDataset
 
-from interp_pipeline.c2s_local.load_model import load_c2s_model
-from interp_pipeline.c2s_local.tokenizer import C2STokenizer
-from interp_pipeline.c2s_local.processor import C2SProcessor
+from interp_pipeline.vendor.c2s_local.load_model import load_c2s_model
+from interp_pipeline.vendor.c2s_local.tokenizer import C2STokenizer
+from interp_pipeline.vendor.c2s_local.processor import C2SProcessor
 
 
 @dataclass

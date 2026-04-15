@@ -11,7 +11,7 @@ from interp_pipeline.types.activations import TokenUnit
 from interp_pipeline.types.dataset import StandardDataset
 
 # Use the vendored scGPT implementation (your clean local version)
-from interp_pipeline.scgpt_local.load_model_from_pretrain import (
+from interp_pipeline.vendor.scgpt_local.load_model_from_pretrain import (
     create_clean_model_from_pretrain,
 )
 

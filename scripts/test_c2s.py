@@ -76,7 +76,7 @@ print("obs columns:", list(adata.obs.columns))
 # ## 3. Utility: generate_vocabulary & generate_sentences
 
 # %%
-from interp_pipeline.c2s_local.util import generate_vocabulary, generate_sentences
+from interp_pipeline.vendor.c2s_local.util import generate_vocabulary, generate_sentences
 
 vocab = generate_vocabulary(adata)
 print("Vocabulary size:", len(vocab))
