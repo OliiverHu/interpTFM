@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+import os, glob
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Literal
 
@@ -12,7 +12,7 @@ from interp_pipeline.adapters.datasets.cosmx import CosMxDatasetAdapter
 from interp_pipeline.adapters.models.scgpt import ScGPTAdapter
 from interp_pipeline.adapters.model_base import ModelSpec
 
-from interp_pipeline.extraction.extractor import extract_activations
+from interp_pipeline.extraction.scgpt_extraction import extract_activations
 from interp_pipeline.io.activation_store import ActivationStore, ActivationStoreSpec
 
 from interp_pipeline.sae.sae_base import SAESpec
@@ -26,7 +26,7 @@ from interp_pipeline.get_annotation.f1_alignment import heldout_report_for_layer
 # ============================================================
 # Global paths / constants
 # ============================================================
-ADATA_PATH = "/maiziezhou_lab2/yunfei/Projects/FM_temp/InterPLM/interplm/ge_shards/cosmx_human_lung_sec8.h5ad"
+ADATA_PATH = "/maiziezhou_lab2/yunfei/Projects/FM_temp/interGFM/ge_shards/cosmx_human_lung_sec8.h5ad"
 SCGPT_CKPT = "/maiziezhou_lab/zihang/SpatialFoundationModel/eval/scGPT/whole-human-pretrain"
 OUT_ROOT = "runs/scgpt12layers_cosmx_human_lung_sec8"
 DEVICE = "cuda"
@@ -111,6 +111,11 @@ CFG = PipelineConfig(
 # ============================================================
 # Helpers
 # ============================================================
+def generic_activation_shards_exist(store_root: str, layer: str) -> bool:
+    pat = os.path.join(store_root, "activations", layer, "shard_*", "activations.pt")
+    return len(glob.glob(pat)) > 0
+
+
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
@@ -386,15 +391,19 @@ def main() -> None:
             continue
 
         # 3a) Extract activations
-        print("[2a] Extract activations")
-        extract_activations(
-            dataset=ds,
-            model_handle=handle,
-            model_adapter=adapter,
-            layers=[layer],
-            store=store,
-            extraction_cfg=EXTRACT_CFG,
-        )
+        if generic_activation_shards_exist(OUT_ROOT, layer):
+            print("[2a] Extract activations")
+            print(f"  activation shards already exist for {layer}; skipping extraction")
+        else:
+            print("[2a] Extract activations")
+            extract_activations(
+                dataset=ds,
+                model_handle=handle,
+                model_adapter=adapter,
+                layers=[layer],
+                store=store,
+                extraction_cfg=EXTRACT_CFG,
+            )
 
         # 3b) Train SAE
         print("[2b] Train SAE")

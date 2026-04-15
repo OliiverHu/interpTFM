@@ -110,7 +110,9 @@ def extract_c2s_shard(
         normalize=normalize,
     )
 
-    for batch_idx, batch in enumerate(tqdm(batch_iter, desc=f"Shard {shard} extracting")):
+    for batch_idx, batch in enumerate(
+        tqdm(batch_iter, desc=f"Shard {shard} batches", position=1, leave=False)
+    ):
         batch["pooling"] = pooling
         batch["save_dtype"] = save_dtype
         batch["pool_dtype"] = pool_dtype
@@ -134,6 +136,8 @@ def extract_c2s_shard(
             batch_idx=batch_idx,
         )
 
+
+from tqdm import tqdm
 
 def extract_c2s_dataset(
     adata,
@@ -161,9 +165,13 @@ def extract_c2s_dataset(
         f"pooling={pooling}, save_dtype={save_dtype}, pool_dtype={pool_dtype}"
     )
 
-    for s in range(shards):
-        subset = adata[adata.obs[shard_key] == f"shard_{s}"].copy()
-        print(f"\nProcessing shard_{s}: {subset.n_obs} cells")
+    shard_names = [f"shard_{s}" for s in range(shards)]
+
+    for s_name in tqdm(shard_names, desc="Shards", position=0):
+        s = int(s_name.split("_")[1])
+        subset = adata[adata.obs[shard_key] == s_name].copy()
+
+        tqdm.write(f"Processing {s_name}: {subset.n_obs} cells")
 
         if subset.n_obs == 0:
             continue

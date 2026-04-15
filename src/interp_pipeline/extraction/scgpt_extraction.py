@@ -23,10 +23,19 @@ def extract_activations(
 
     Behavior:
       - iterate batches from adapter
-      - capture activations per requested layer
-      - accumulate into per-layer buffers
+      - capture activations per requested layer (token-level: [B,T,H])
+      - flatten -> [B*T, H]
+      - ACCUMULATE into per-layer buffers
       - flush buffers to disk when token budget reached
-      - aim for <= max_shards by auto-computing token budget from first batch
+      - aim for <= max_shards (default 512) by auto-computing token budget from first batch
+
+    Config keys:
+      - batch_size: int
+      - max_length: int
+      - start_shard: int
+      - model_name: str
+      - max_shards: int (default 512)
+      - target_tokens_per_shard: Optional[int] (if provided, overrides auto budget)
     """
 
     batch_size = int(extraction_cfg.get("batch_size", 16))
@@ -37,20 +46,24 @@ def extract_activations(
     if max_shards is not None:
         max_shards = int(max_shards)
 
+    # If user specifies it, we use it. Otherwise we compute it from first batch.
     target_tokens_per_shard: Optional[int] = extraction_cfg.get("target_tokens_per_shard", None)
     if target_tokens_per_shard is not None:
         target_tokens_per_shard = int(target_tokens_per_shard)
 
     extracted_layers: List[str] = []
 
+    # Buffers per layer: accumulate until we flush a shard.
     buf = {
         layer: {"acts": [], "ex": [], "tok": [], "n": 0, "token_unit": None}
         for layer in layers
     }
 
+    # Minimal index stub (SAE reads from store)
     global_example_ids: List[str] = []
     global_token_ids: List[str] = []
 
+    # Helper: flush a layer buffer as one shard
     def _flush_layer(layer_name: str) -> None:
         nonlocal shard_id
         b = buf[layer_name]
@@ -69,14 +82,16 @@ def extract_activations(
         )
         shard_id += 1
 
+        # reset
         b["acts"].clear()
         b["ex"].clear()
         b["tok"].clear()
         b["n"] = 0
 
+    # Compute auto budget from first batch
     computed_budget = False
 
-    for _, batch in enumerate(
+    for batch_idx, batch in enumerate(
         model_adapter.make_batches(dataset, model_handle, batch_size=batch_size, max_length=max_length)
     ):
         captured = model_adapter.forward_and_capture(
@@ -86,6 +101,7 @@ def extract_activations(
             capture_cfg=extraction_cfg,
         )
 
+        # Some adapters might return empty dict if capture fails; make that obvious.
         if not captured:
             raise RuntimeError(
                 "forward_and_capture returned no activations. "
@@ -94,10 +110,12 @@ def extract_activations(
 
         buf_entries = model_adapter.process_captured(captured, batch)
 
+        # Determine budget once from the first batch's actual token count.
         if (not computed_budget) and (target_tokens_per_shard is None):
             any_entry = buf_entries[next(iter(buf_entries))]
             T_list = any_entry["T_list"]
             T0 = sum(T_list) / max(1, len(T_list))
+            # T0 = max(T_list)
 
             n_obs = int(getattr(dataset.adata, "n_obs", len(dataset.adata.obs_names)))
             total_tokens_est = n_obs * T0
@@ -106,10 +124,7 @@ def extract_activations(
             target_tokens_per_shard = max(1, int(math.ceil(total_tokens_est / denom)))
 
             computed_budget = True
-            print(
-                f"[extractor] auto target_tokens_per_shard={target_tokens_per_shard} "
-                f"(T≈{T0:.1f}, n_obs={n_obs}, max_shards={max_shards})"
-            )
+            print(f"[extractor] auto target_tokens_per_shard={target_tokens_per_shard} (T≈{T0:.1f}, n_obs={n_obs}, max_shards={max_shards})")
 
         for layer_name, entry in buf_entries.items():
             b = buf[layer_name]
@@ -124,10 +139,13 @@ def extract_activations(
             if layer_name not in extracted_layers:
                 extracted_layers.append(layer_name)
 
+            # Flush if we reached budget
             if target_tokens_per_shard is not None and b["n"] >= target_tokens_per_shard:
                 _flush_layer(layer_name)
 
+                # stop early if max_shards hit
                 if max_shards is not None and shard_id >= max_shards:
+                    # flush other layers too (optional: keep consistent)
                     for ln in layers:
                         _flush_layer(ln)
                     index = ActivationIndex(
@@ -138,6 +156,7 @@ def extract_activations(
                     )
                     return index, extracted_layers
 
+    # Final flush leftovers
     for ln in layers:
         _flush_layer(ln)
 

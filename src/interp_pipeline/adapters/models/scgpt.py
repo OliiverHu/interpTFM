@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Sequence, Tuple, Optional
 
 import numpy as np
 import torch
@@ -10,7 +10,6 @@ from interp_pipeline.adapters.model_base import ModelAdapter, ModelSpec
 from interp_pipeline.types.activations import TokenUnit
 from interp_pipeline.types.dataset import StandardDataset
 
-# Use the vendored scGPT implementation (your clean local version)
 from interp_pipeline.scgpt_local.load_model_from_pretrain import (
     create_clean_model_from_pretrain,
 )
@@ -18,34 +17,52 @@ from interp_pipeline.scgpt_local.load_model_from_pretrain import (
 
 @dataclass
 class ScGPTHandle:
-    model: torch.nn.Module
-    tokenizer: Any  # interp_pipeline.third_party.scgpt_local.tokenizer.Tokenizer
-    device: torch.device
+    model: Any
+    tokenizer: Any
+    device: str
+    n_layers: int
 
 
 class ScGPTAdapter(ModelAdapter):
     """
-    Adapter around your local scGPT clean implementation.
+    Adapter for scGPT models.
 
-    Key points:
-    - model(src, values, src_key_padding_mask) returns token-level hidden states [B,T,H]
-    - we capture internal activations via forward hooks on transformer_encoder.layers[i].norm2
-      (same behavior as your old extraction script)
+    Current assumptions:
+    - dataset.adata is an AnnData-like object
+    - tokenizer returns tokenized gene/expression tensors plus padding mask
+    - NNsight is used to trace and capture layer outputs
     """
 
     def load(self, spec: ModelSpec) -> ScGPTHandle:
-        device = torch.device(spec.device)
-        model, tokenizer = create_clean_model_from_pretrain(spec.checkpoint, device=device)
-        return ScGPTHandle(model=model, tokenizer=tokenizer, device=device)
+        model, tokenizer = create_clean_model_from_pretrain(
+            spec.checkpoint,
+            device=spec.device,
+        )
+
+        n_layers = None
+
+        # The wrapped NNsight model should still expose underlying module attributes.
+        if hasattr(model, "transformer_encoder") and hasattr(model.transformer_encoder, "layers"):
+            n_layers = len(model.transformer_encoder.layers)
+        elif hasattr(model, "encoder") and hasattr(model.encoder, "layers"):
+            n_layers = len(model.encoder.layers)
+        elif hasattr(model, "layers"):
+            n_layers = len(model.layers)
+
+        if n_layers is None:
+            raise RuntimeError("Could not infer number of transformer layers for scGPT model.")
+
+        return ScGPTHandle(
+            model=model,
+            tokenizer=tokenizer,
+            device=spec.device,
+            n_layers=n_layers,
+        )
 
     def list_layers(self, model_handle: ScGPTHandle) -> List[str]:
-        # Your scGPTConfig stores nlayers in model.config.nlayers
-        n = int(model_handle.model.config.nlayers)
-        # Stable naming scheme for pipeline
-        return [f"layer_{i}" for i in range(n)]
+        return [f"layer_{i}" for i in range(model_handle.n_layers)]
 
     def infer_token_unit(self, layer_name: str) -> TokenUnit:
-        # currently only initialized with "gene"
         return "gene"
 
     def make_batches(
@@ -54,49 +71,33 @@ class ScGPTAdapter(ModelAdapter):
         model_handle: ScGPTHandle,
         batch_size: int,
         max_length: int,
+        **kwargs: Any,
     ) -> Iterable[Dict[str, Any]]:
-        """
-        Batches are built by running tokenizer on chunks of adata.X.
-
-        Required output keys for extractor:
-          - cell_ids: list[str] length B
-          - genes: Tensor[B,T]
-          - expressions: Tensor[B,T]
-          - src_key_padding_mask: Tensor[B,T] bool
-        """
         adata = dataset.adata
+        n = adata.n_obs
 
-        # Choose gene symbol column for tokenizer vocab mapping.
-        # Your dataset seems to have 'feature_name' in .var (from your printout).
-        gene_key = "feature_name"
-        if gene_key not in adata.var.columns:
-            # fallback; adjust if your var uses different naming
-            if "index" in adata.var.columns:
-                gene_key = "index"
-            else:
-                raise ValueError("AnnData .var must include a gene symbol column like 'feature_name' or 'index'")
-
-        gene_names = adata.var[gene_key].to_numpy()
+        if "feature_name" in adata.var.columns:
+            gene_names = [str(x) for x in adata.var["feature_name"].tolist()]
+        else:
+            gene_names = [str(x) for x in adata.var_names.tolist()]
 
         X = adata.X
-        # tokenizer supports np.ndarray or torch.Tensor; we’ll feed numpy float32
-        if not isinstance(X, np.ndarray):
-            X = X.toarray()
-        X = X.astype(np.float32)
 
-        n = adata.n_obs
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
             cell_ids = [str(x) for x in adata.obs_names[start:end]]
 
-            # Tokenize: returns (genes, expressions, src_key_padding_mask)
+            # Slice first, densify second
+            X_batch = X[start:end]
+            if not isinstance(X_batch, np.ndarray):
+                X_batch = X_batch.toarray()
+            X_batch = X_batch.astype(np.float32, copy=False)
+
+            # Your tokenizer appears to return (genes, expressions, src_key_padding_mask)
             genes, expressions, src_key_padding_mask = model_handle.tokenizer(
-                X[start:end],
+                X_batch,
                 gene_names,
                 max_length=max_length,
-                include_zero_genes=False,
-                normalize=True,
-                add_cls=True,
             )
 
             yield {
@@ -106,45 +107,66 @@ class ScGPTAdapter(ModelAdapter):
                 "src_key_padding_mask": src_key_padding_mask,
             }
 
+    def _layer_name_to_index(self, layer_name: str) -> int:
+        if not layer_name.startswith("layer_"):
+            raise ValueError(f"Unsupported layer name format: {layer_name}")
+        try:
+            return int(layer_name.split("_", 1)[1])
+        except Exception as e:
+            raise ValueError(f"Could not parse layer index from: {layer_name}") from e
+
     def forward_and_capture(
         self,
         model_handle: ScGPTHandle,
         batch: Dict[str, Any],
         layers: Sequence[str],
-        capture_cfg: Dict[str, Any],
+        capture_cfg: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
-        """
-        Reliable capture: manually iterate transformer layers and record outputs.
-        Avoids the nested-tensor TransformerEncoder fast-path where hooks don't fire.
-        """
+        capture_cfg = capture_cfg or {}
+
         model = model_handle.model
         device = model_handle.device
 
-        genes = batch["genes"].to(device)                  # [B,T]
-        expressions = batch["expressions"].to(device)      # [B,T]
-        padmask = batch["src_key_padding_mask"].to(device) # [B,T] bool
+        genes = batch["genes"].to(device)
+        expressions = batch["expressions"].to(device)
+        src_key_padding_mask = batch["src_key_padding_mask"].to(device)
+
+        layer_idxs = [self._layer_name_to_index(layer_name) for layer_name in layers]
+
+        saved: Dict[str, Any] = {}
+
+        with torch.no_grad():
+            with model.trace(genes, expressions, src_key_padding_mask):
+                for idx in layer_idxs:
+                    layer_name = f"layer_{idx}"
+                    saved[layer_name] = model.transformer_encoder.layers[idx].output.save()
 
         captured: Dict[str, torch.Tensor] = {}
-        layer_idxs = sorted([int(lname.split("_")[1]) for lname in layers])
-        with torch.no_grad(), model.trace(genes, expressions, padmask):
-            for layer, idx in zip(layers, layer_idxs):
-                captured[layer] = model.transformer_encoder.layers[idx].output.save()
+        B = batch["genes"].shape[0]
+        T = batch["genes"].shape[1]
 
-        # Build input embeddings as model.forward does
-        # x = model.encoder(genes) + model.value_encoder(expressions)  # [B,T,H]
+        for layer_name, value in saved.items():
+            acts = value.value if hasattr(value, "value") else value
 
-        # # Parse which layer indices we want
-        # want = {}
-        # for lname in layers:
-        #     idx = int(lname.split("_")[1])
-        #     want[idx] = lname
+            if not isinstance(acts, torch.Tensor):
+                acts = torch.as_tensor(acts)
 
-        # captured: Dict[str, torch.Tensor] = {}
-        # with torch.no_grad():
-        #     for i, layer in enumerate(model.transformer_encoder.layers):
-        #         x = layer(x, src_key_padding_mask=padmask)  # [B,T,H]
-        #         if i in want:
-        #             captured[want[i]] = x.detach().to("cpu")
+            # NNsight / transformer may return NestedTensor here.
+            # Convert to dense [B, T, H] using zero padding.
+            if getattr(acts, "is_nested", False):
+                acts = acts.to_padded_tensor(0.0)
+
+            if acts.ndim != 3:
+                raise ValueError(
+                    f"{layer_name}: expected 3D activations after capture, got ndim={acts.ndim}"
+                )
+
+            # Defensive fix in case backend returns [T, B, H]
+            if acts.shape[0] == T and acts.shape[1] == B:
+                acts = acts.transpose(0, 1).contiguous()
+
+            captured[layer_name] = acts
 
         return captured
 
@@ -154,64 +176,82 @@ class ScGPTAdapter(ModelAdapter):
         batch: Dict[str, Any],
     ) -> Dict[str, Dict[str, Any]]:
         """
-        Convert raw captured activations into buffer-ready entries.
-        Handles token id extraction and flattening of [B, T, H] -> [B*T, H].
-        """
-        genes: torch.Tensor = batch["genes"].to("cpu")   # [B, T]
-        cell_ids = batch["cell_ids"]
-        padmask = batch["src_key_padding_mask"].to("cpu")  # [B, T] bool, True=padding
-
-        # real token count per cell from padding mask
-        T_list: List[int] = (~padmask).sum(dim=1).tolist()
-        tok_list = [str(x) for x in genes[~padmask].tolist()]
-
-
-        ex_list: List[str] = []
-        for cid, t in zip(cell_ids, T_list):
-            ex_list.extend([str(cid)] * t)
-
-        result: Dict[str, Dict[str, Any]] = {}
-        for layer_name, acts_btH in captured.items():
-            flat = torch.cat(acts_btH.unbind(), dim=0)   # nested [B, T_i, H] -> [N, H]
-            
-            result[layer_name] = {
-                "acts": flat,
-                "tok": tok_list,
-                "ex": ex_list,
-                "token_unit": self.infer_token_unit(layer_name),
-                "T_list": T_list,   # include T_list for potential downstream use
+        Normalize captured scGPT outputs into the generic adapter format:
+          {
+            layer_name: {
+              "acts": Tensor[N, H],
+              "tok": List[str],
+              "ex": List[str],
+              "token_unit": "gene",
+              "T_list": List[int],
             }
-        return result
+          }
+        """
+        genes = batch["genes"]
+        src_key_padding_mask = batch["src_key_padding_mask"]
+        cell_ids = batch["cell_ids"]
 
-    # def process_captured(
-    #     self,
-    #     captured: Dict[str, Any],
-    #     batch: Dict[str, Any],
-    # ) -> Dict[str, Dict[str, Any]]:
-    #     """
-    #     Convert raw captured activations into buffer-ready entries.
-    #     Handles token id extraction and flattening of [B, T, H] -> [B*T, H].
-    #     """
-    #     genes: torch.Tensor = batch["genes"].to("cpu")   # [B, T]
-    #     cell_ids = batch["cell_ids"]
-    #     B, T = genes.shape
+        if isinstance(genes, torch.Tensor):
+            genes_cpu = genes.detach().cpu()
+        else:
+            genes_cpu = torch.as_tensor(genes)
 
-    #     tok_list = genes.reshape(B * T).tolist()
-    #     tok_list = [str(x) for x in tok_list]
+        if isinstance(src_key_padding_mask, torch.Tensor):
+            padmask_cpu = src_key_padding_mask.detach().cpu().bool()
+        else:
+            padmask_cpu = torch.as_tensor(src_key_padding_mask).bool()
 
-    #     ex_list: List[str] = []
-    #     for cid in cell_ids:
-    #         ex_list.extend([str(cid)] * T)
+        if genes_cpu.ndim != 2:
+            raise ValueError(f"Expected genes to have shape [B, T], got {tuple(genes_cpu.shape)}")
+        if padmask_cpu.shape != genes_cpu.shape:
+            raise ValueError(
+                f"Padding mask shape {tuple(padmask_cpu.shape)} "
+                f"does not match genes shape {tuple(genes_cpu.shape)}"
+            )
 
-    #     result: Dict[str, Dict[str, Any]] = {}
-    #     for layer_name, acts_btH in captured.items():
-    #         flat = acts_btH.reshape(B * T, acts_btH.shape[-1]).contiguous()
-    #         result[layer_name] = {
-    #             "acts": flat,
-    #             "tok": tok_list,
-    #             "ex": ex_list,
-    #             "token_unit": self.infer_token_unit(layer_name),
-    #         }
-    #     return result
+        out: Dict[str, Dict[str, Any]] = {}
 
+        for layer_name, acts_btH in captured.items():
+            if not isinstance(acts_btH, torch.Tensor):
+                raise TypeError(f"{layer_name}: expected torch.Tensor, got {type(acts_btH)}")
+            if acts_btH.ndim != 3:
+                raise ValueError(f"{layer_name}: expected [B, T, H], got shape {tuple(acts_btH.shape)}")
 
+            acts_cpu = acts_btH.detach().cpu()
+
+            B, T, H = acts_cpu.shape
+            if tuple(genes_cpu.shape) != (B, T):
+                raise ValueError(
+                    f"{layer_name}: genes shape {tuple(genes_cpu.shape)} "
+                    f"does not match activations shape {(B, T, H)}"
+                )
+
+            valid_mask = ~padmask_cpu
+            acts_flat = acts_cpu[valid_mask]            # [N, H]
+            tok_flat = genes_cpu[valid_mask].tolist()   # length N
+
+            ex_flat: List[str] = []
+            valid_counts = [int(x) for x in valid_mask.sum(dim=1).tolist()]
+            for cell_id, n_valid in zip(cell_ids, valid_counts):
+                ex_flat.extend([str(cell_id)] * n_valid)
+
+            n_rows = int(acts_flat.shape[0])
+
+            if len(tok_flat) != n_rows:
+                raise ValueError(
+                    f"{layer_name}: token id count {len(tok_flat)} != activation rows {n_rows}"
+                )
+            if len(ex_flat) != n_rows:
+                raise ValueError(
+                    f"{layer_name}: example id count {len(ex_flat)} != activation rows {n_rows}"
+                )
+
+            out[layer_name] = {
+                "acts": acts_flat,
+                "tok": [str(x) for x in tok_flat],
+                "ex": ex_flat,
+                "token_unit": "gene",
+                "T_list": valid_counts,
+            }
+
+        return out

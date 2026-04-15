@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import argparse
 import glob
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -20,13 +19,11 @@ from interp_pipeline.get_annotation.f1_alignment import heldout_report_for_layer
 from interp_pipeline.get_annotation.gprofiler_client import GProfilerClient, GProfilerSpec
 from interp_pipeline.get_annotation.panel import panel_from_cosmx_adata
 from interp_pipeline.io.activation_store import ActivationStore, ActivationStoreSpec
+from interp_pipeline.sae.normalize import normalize_sae_features
 from interp_pipeline.sae.sae_base import SAESpec
 from interp_pipeline.sae.trainers import fit_sae_for_layer
 
-# -----------------------------------------------------------------------------
-# Defaults aligned to the user's current setup
-# -----------------------------------------------------------------------------
-ADATA_SHARD_PATH = "/maiziezhou_lab2/yunfei/Projects/FM_temp/InterPLM/interplm/ge_shards/cosmx_human_lung_sec8.h5ad"
+ADATA_SHARD_PATH = "/maiziezhou_lab2/yunfei/Projects/FM_temp/interGFM/ge_shards/cosmx_human_lung_sec8.h5ad"
 ADATA_SOURCE_PATH = "/maiziezhou_lab2/yunfei/Projects/FM_temp/datasets/cosmx/lung/cosmx_human_lung.h5ad"
 MODEL_PATH = "/maiziezhou_lab2/yunfei/Projects/interpTFM-legacy/c2sscale/models/C2S-Scale-Gemma-2-2B"
 EXTRACTION_ROOT = "/maiziezhou_lab2/yunfei/Projects/interpTFM/c2s_full_extraction"
@@ -59,13 +56,10 @@ class ExtractionConfig:
     pooling: str = "last"
     save_dtype: str = "fp16"
     pool_dtype: str = "fp32"
-    normalize: bool = False
+    normalize: bool = True
     cache_dir: Optional[str] = None
 
 
-# -----------------------------------------------------------------------------
-# Small helpers copied from / aligned with run_scgpt_full_12layers.py
-# -----------------------------------------------------------------------------
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
@@ -124,7 +118,8 @@ def build_gprofiler_gt(
         return bin_path
 
     adata = sc.read_h5ad(adata_path)
-    panel = panel_from_cosmx_adata(adata, symbol_col="index")
+    symbol_col = "feature_name" if "feature_name" in adata.var.columns else "index"
+    panel = panel_from_cosmx_adata(adata, symbol_col=symbol_col)
     genes_ens = panel.ensembl_ids
     genes_sym = panel.symbols
     sym_to_ens = {s: e for e, s in panel.ens_to_sym.items()}
@@ -198,9 +193,6 @@ def build_gprofiler_gt(
     return bin_path
 
 
-# -----------------------------------------------------------------------------
-# Data prep / extraction detection
-# -----------------------------------------------------------------------------
 def load_or_prepare_sec8_h5ad(shard_path: str, source_path: str, n_shards: int = 60, seed: int = 0):
     p = Path(shard_path)
     if p.exists():
@@ -237,9 +229,39 @@ def generic_activation_shards_exist(out_root: str, layer: str) -> bool:
     return len(glob.glob(pat)) > 0
 
 
-# -----------------------------------------------------------------------------
-# C2S -> generic ActivationStore conversion
-# -----------------------------------------------------------------------------
+def prepare_heldout_adata_schema(adata_path: str, out_root: str) -> str:
+    adata = sc.read_h5ad(adata_path).copy()
+
+    original_ens = adata.var_names.astype(str)
+    adata.var["ensembl_id"] = original_ens
+
+    if "feature_name" in adata.var.columns:
+        gene_symbols = adata.var["feature_name"].astype(str)
+        adata.var["gene_symbol"] = gene_symbols
+        adata.var["index"] = gene_symbols
+    elif "index" in adata.var.columns:
+        gene_symbols = adata.var["index"].astype(str)
+        adata.var["gene_symbol"] = gene_symbols
+    else:
+        raise ValueError(
+            "Need either adata.var['feature_name'] or adata.var['index'] to build symbol->Ensembl mapping."
+        )
+
+    mapped = sum(
+        1
+        for sym, ens in zip(adata.var["gene_symbol"].astype(str), adata.var["ensembl_id"].astype(str))
+        if sym and ens and sym.lower() != "nan" and ens.lower() != "nan"
+    )
+    print(f"[mapping] prepared heldout AnnData schema with {mapped}/{adata.n_vars} symbol->Ensembl entries")
+
+    tmp_dir = os.path.join(out_root, "_tmp")
+    ensure_dir(tmp_dir)
+    patched_path = os.path.join(tmp_dir, "heldout_schema_patched.h5ad")
+    adata.write(patched_path)
+    print(f"[mapping] wrote patched heldout h5ad: {patched_path}")
+    return patched_path
+
+
 def _read_pairs_file(path: str) -> Tuple[List[str], List[str]]:
     example_ids: List[str] = []
     token_ids: List[str] = []
@@ -327,9 +349,6 @@ def convert_c2s_layer_to_activation_store(c2s_root: str, out_root: str, layer: s
     return written
 
 
-# -----------------------------------------------------------------------------
-# Pipeline steps
-# -----------------------------------------------------------------------------
 def maybe_run_extraction(
     adata,
     model_path: str,
@@ -343,6 +362,7 @@ def maybe_run_extraction(
         return
 
     print(f"[extract] missing c2s activations for {missing}; running extract_c2s_dataset(...) into {extraction_root}")
+    print(f"[extract] normalize={cfg.normalize}")
     extract_c2s_dataset(
         adata=adata,
         model_path=model_path,
@@ -387,6 +407,36 @@ def train_sae_for_layer(out_root: str, layer: str, device: str) -> str:
     return res.model_path
 
 
+
+def maybe_normalize_sae_checkpoint(
+    out_root: str,
+    layer: str,
+    sae_ckpt_path: str,
+    device: str,
+    enabled: bool,
+    max_shards: Optional[int] = None,
+    token_chunk_size: int = 4096,
+    feature_chunk_size: int = 1024,
+) -> str:
+    if not enabled:
+        print(f"[sae-normalize] disabled for {layer}; using raw SAE checkpoint")
+        return sae_ckpt_path
+
+    print(f"[sae-normalize] normalizing SAE features for {layer}")
+    norm_ckpt = normalize_sae_features(
+        ckpt_path=sae_ckpt_path,
+        store_root=out_root,
+        layer=layer,
+        output_path=None,
+        device=device,
+        max_shards=max_shards,
+        token_chunk_size=token_chunk_size,
+        feature_chunk_size=feature_chunk_size,
+    )
+    print(f"[sae-normalize] normalized checkpoint: {norm_ckpt}")
+    return norm_ckpt
+
+
 def run_heldout_for_layer(
     out_root: str,
     layer: str,
@@ -398,6 +448,7 @@ def run_heldout_for_layer(
 ) -> str:
     heldout_out = os.path.join(out_root, "heldout_report", layer)
     ensure_dir(heldout_out)
+    patched_adata_path = prepare_heldout_adata_schema(adata_path=adata_path, out_root=out_root)
     print(f"[heldout] layer={layer}")
     heldout_report_for_layer(
         layer=layer,
@@ -406,7 +457,7 @@ def run_heldout_for_layer(
         sae_ckpt_path=sae_ckpt_path,
         out_dir=heldout_out,
         latent_thresholds=list(latent_thresholds),
-        adata_path=adata_path,
+        adata_path=patched_adata_path,
         scgpt_ckpt=None,
         device=device,
         dev_mode=False,
@@ -417,9 +468,6 @@ def run_heldout_for_layer(
     return heldout_out
 
 
-# -----------------------------------------------------------------------------
-# CLI / main
-# -----------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run c2s-scale full pipeline up through SAE + heldout report.")
     p.add_argument("--adata-path", default=ADATA_SHARD_PATH)
@@ -442,8 +490,27 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--extract-pooling", default="last")
     p.add_argument("--extract-save-dtype", default="fp16")
     p.add_argument("--extract-pool-dtype", default="fp32")
-    p.add_argument("--extract-normalize", action="store_true")
+    p.add_argument(
+        "--extract-normalize",
+        dest="extract_normalize",
+        action="store_true",
+        default=True,
+        help="Use normalized inputs for c2s extraction (default: on).",
+    )
+    p.add_argument(
+        "--no-extract-normalize",
+        dest="extract_normalize",
+        action="store_false",
+        help="Disable normalization during c2s extraction.",
+    )
     p.add_argument("--extract-cache-dir", default=None)
+    p.add_argument("--normalize-sae-features", dest="normalize_sae_features", action="store_true", default=True,
+                   help="Normalize SAE features to unit max activation before heldout (default: on).")
+    p.add_argument("--no-normalize-sae-features", dest="normalize_sae_features", action="store_false",
+                   help="Disable post-training SAE feature normalization.")
+    p.add_argument("--normalize-sae-max-shards", type=int, default=None)
+    p.add_argument("--normalize-sae-token-chunk-size", type=int, default=4096)
+    p.add_argument("--normalize-sae-feature-chunk-size", type=int, default=1024)
     return p.parse_args()
 
 
@@ -459,6 +526,8 @@ def main() -> None:
     print(f"EXTRACTION_ROOT  = {args.extraction_root}")
     print(f"OUT_ROOT         = {args.out_root}")
     print(f"LAYERS           = {args.layers}")
+    print(f"EXTRACT_NORMALIZE= {args.extract_normalize}")
+    print(f"SAE_NORMALIZE    = {args.normalize_sae_features}")
     print("=" * 80)
 
     print("[0] build/load g:Profiler GT")
@@ -520,6 +589,18 @@ def main() -> None:
                 raise FileNotFoundError(f"--skip-sae was set but checkpoint not found: {sae_ckpt}")
             sae_ckpts[layer] = sae_ckpt
             print(f"[sae] using existing checkpoint for {layer}: {sae_ckpt}")
+
+    for layer in args.layers:
+        sae_ckpts[layer] = maybe_normalize_sae_checkpoint(
+            out_root=args.out_root,
+            layer=layer,
+            sae_ckpt_path=sae_ckpts[layer],
+            device=args.device,
+            enabled=args.normalize_sae_features,
+            max_shards=args.normalize_sae_max_shards,
+            token_chunk_size=args.normalize_sae_token_chunk_size,
+            feature_chunk_size=args.normalize_sae_feature_chunk_size,
+        )
 
     for layer in args.layers:
         if args.skip_heldout:
