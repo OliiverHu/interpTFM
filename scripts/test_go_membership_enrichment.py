@@ -3,6 +3,7 @@ import time
 import numpy as np
 import scanpy as sc
 from tqdm import tqdm
+#### for GT construction
 
 from interp_pipeline.get_annotation.panel import panel_from_cosmx_adata
 from interp_pipeline.get_annotation.gprofiler_client import GProfilerClient, GProfilerSpec
