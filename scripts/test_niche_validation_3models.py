@@ -22,7 +22,6 @@ from interp_pipeline.downstream.context.validate import (
 )
 from interp_pipeline.downstream.context.plot import (
     plot_spatial_side_by_side,
-    stacked_bar_composition,
     plot_top_positive_residuals,
     collapse_celltypes,
     plot_spatial_labels,
@@ -105,16 +104,184 @@ def get_model_config(label: str, layer: str, configs: Optional[pd.DataFrame], ar
 def make_lineage_mapping() -> Dict[str, str]:
     return {
         "tumor 13": "Tumor",
+        "tumor 9": "Tumor",
+        "tumor 12": "Tumor",
+        "tumor 5": "Tumor",
+        "tumor 6": "Tumor",
         "T CD4 memory": "T cell",
         "T CD8 memory": "T cell",
+        "T CD4 naive": "T cell",
+        "T CD8 naive": "T cell",
         "Treg": "T cell",
+        "NK": "NK",
         "macrophage": "Myeloid",
+        "monocyte": "Myeloid",
+        "neutrophil": "Myeloid",
         "pDC": "Myeloid",
+        "mDC": "Myeloid",
         "fibroblast": "Stromal",
         "endothelial": "Stromal",
+        "epithelial": "Epithelial",
         "mast": "Mast",
         "plasmablast": "B cell",
+        "B-cell": "B cell",
     }
+
+
+# Fixed orders and colors for cross-model composition plots.
+# The important point is that a given cell type/lineage always maps to the same color,
+# even if top_n/min_frac causes a different subset of categories to be shown for a model.
+CELLTYPE_ORDER = [
+    "tumor 13",
+    "tumor 9",
+    "tumor 12",
+    "tumor 5",
+    "tumor 6",
+    "epithelial",
+    "fibroblast",
+    "endothelial",
+    "macrophage",
+    "monocyte",
+    "neutrophil",
+    "pDC",
+    "mDC",
+    "T CD4 memory",
+    "T CD8 memory",
+    "T CD4 naive",
+    "T CD8 naive",
+    "Treg",
+    "NK",
+    "B-cell",
+    "plasmablast",
+    "mast",
+    "Other",
+]
+
+CELLTYPE_COLORS = {
+    "tumor 13": "#1f77b4",
+    "tumor 9": "#aec7e8",
+    "tumor 12": "#6baed6",
+    "tumor 5": "#08519c",
+    "tumor 6": "#3182bd",
+    "epithelial": "#9ecae1",
+    "fibroblast": "#ff7f0e",
+    "endothelial": "#ffbb78",
+    "macrophage": "#2ca02c",
+    "monocyte": "#98df8a",
+    "neutrophil": "#006d2c",
+    "pDC": "#74c476",
+    "mDC": "#31a354",
+    "T CD4 memory": "#d62728",
+    "T CD8 memory": "#9467bd",
+    "T CD4 naive": "#ff9896",
+    "T CD8 naive": "#c5b0d5",
+    "Treg": "#8c564b",
+    "NK": "#e377c2",
+    "B-cell": "#bcbd22",
+    "plasmablast": "#dbdb8d",
+    "mast": "#7f7f7f",
+    "Other": "#bdbdbd",
+}
+
+LINEAGE_ORDER = [
+    "Tumor",
+    "Epithelial",
+    "Stromal",
+    "Myeloid",
+    "T cell",
+    "NK",
+    "B cell",
+    "Mast",
+    "Other",
+]
+
+LINEAGE_COLORS = {
+    "Tumor": "#1f77b4",
+    "Epithelial": "#9ecae1",
+    "Stromal": "#ff7f0e",
+    "Myeloid": "#2ca02c",
+    "T cell": "#d62728",
+    "NK": "#e377c2",
+    "B cell": "#bcbd22",
+    "Mast": "#7f7f7f",
+    "Other": "#bdbdbd",
+}
+
+
+def _order_columns(tab: pd.DataFrame, order: List[str]) -> pd.DataFrame:
+    known = [c for c in order if c in tab.columns]
+    extra = [c for c in tab.columns if c not in known]
+    return tab.loc[:, known + sorted(extra)]
+
+
+def stacked_bar_composition_fixed_colors(
+    tab: pd.DataFrame,
+    *,
+    outpath: str,
+    title: str,
+    min_frac: float = 0.005,
+    top_n: Optional[int] = None,
+    color_map: Optional[Dict[str, str]] = None,
+    order: Optional[List[str]] = None,
+    other_label: str = "Other",
+) -> None:
+    """
+    Stacked niche-composition bar plot with stable category colors.
+
+    This local wrapper avoids model-dependent matplotlib/pandas color cycling.
+    It keeps the same behavior as the existing composition plot in spirit:
+    low-abundance or non-top categories are collapsed into `Other`, then columns
+    are plotted in a fixed order and colored by category name.
+    """
+    import matplotlib.pyplot as plt
+
+    counts = tab.copy()
+    counts.columns = counts.columns.astype(str)
+    counts.index = counts.index.astype(str)
+
+    frac = counts.div(counts.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+
+    keep = list(frac.columns)
+    if min_frac is not None and float(min_frac) > 0:
+        keep = [c for c in keep if float(frac[c].max()) >= float(min_frac)]
+
+    if top_n is not None and int(top_n) > 0 and len(keep) > int(top_n):
+        totals = counts[keep].sum(axis=0).sort_values(ascending=False)
+        keep = totals.head(int(top_n)).index.astype(str).tolist()
+
+    dropped = [c for c in counts.columns if c not in keep]
+    plot_counts = counts[keep].copy()
+    if dropped:
+        plot_counts[other_label] = counts[dropped].sum(axis=1)
+
+    plot_frac = plot_counts.div(plot_counts.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+
+    if order is not None:
+        plot_frac = _order_columns(plot_frac, order)
+
+    if color_map is not None:
+        colors = [color_map.get(str(c), "#bdbdbd") for c in plot_frac.columns]
+    else:
+        colors = None
+
+    fig, ax = plt.subplots(figsize=(max(5.5, 1.4 * len(plot_frac.index) + 2.5), 4.5))
+    plot_frac.plot(kind="bar", stacked=True, ax=ax, width=0.85, color=colors)
+
+    ax.set_title(title)
+    ax.set_xlabel("niche")
+    ax.set_ylabel("fraction of cells")
+    ax.set_ylim(0, 1)
+    ax.legend(
+        title=None,
+        bbox_to_anchor=(1.02, 1.0),
+        loc="upper left",
+        borderaxespad=0.0,
+        fontsize=8,
+        frameon=False,
+    )
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=220)
+    plt.close(fig)
 
 
 def relabel_niches_by_celltype_composition(
@@ -296,12 +463,14 @@ def validate_one_model(
         tab = pd.crosstab(pd.Series(y.astype(int), name="niche").to_numpy(), celltypes.astype(str).to_numpy())
         tab.to_csv(out_dir / "celltype_crosstab_counts_wide.csv")
 
-        stacked_bar_composition(
+        stacked_bar_composition_fixed_colors(
             tab,
             outpath=str(plot_dir / f"celltype_composition_k{int(cfg['n_clusters'])}.png"),
             title=f"{label}: cell type composition per niche",
             min_frac=float(celltype_min_frac),
             top_n=int(celltype_top_n),
+            color_map=CELLTYPE_COLORS,
+            order=CELLTYPE_ORDER,
         )
 
         resid_all = celltype_chi2_residuals(y, celltypes)
@@ -328,11 +497,13 @@ def validate_one_model(
 
         tab_lin = collapse_celltypes(tab, make_lineage_mapping(), other_label="Other")
         tab_lin.to_csv(out_dir / "celltype_lineage_crosstab_counts_wide.csv")
-        stacked_bar_composition(
+        stacked_bar_composition_fixed_colors(
             tab_lin,
             outpath=str(plot_dir / f"celltype_lineage_composition_k{int(cfg['n_clusters'])}.png"),
             title=f"{label}: lineage composition per niche",
             min_frac=0.02,
+            color_map=LINEAGE_COLORS,
+            order=LINEAGE_ORDER,
         )
 
         celltype_outputs = {
