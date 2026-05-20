@@ -374,7 +374,7 @@ PY
 
 Do not silently replace filenames with approximate matches. If a script is missing, either update the config to a verified current filename or disable the corresponding stage until the intended replacement is confirmed.
 
-## Current CosMx example
+<!-- ## Current CosMx example
 
 Example paths used in the current 3-model CosMx workflow:
 
@@ -407,4 +407,4 @@ python scripts/run_layer_workflow_3models.py \
   --config configs/layer_workflow_3models_cosmx.json \
   --only-layer-set cosmx_scgpt_l4__c2sscale_l17__geneformer_l4 \
   --stages sae_train_or_check activation_qc f1_heldout go_reduce f1_qc build_adata niche_validation niche_terms shuffle_control_crosstalk grouped_heatmaps immune_followups
-```
+``` -->
