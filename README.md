@@ -52,6 +52,7 @@ The full conceptual workflow is:
 
 ```text
 extract activations
+→ convert activation stores if needed
 → TIS pre-SAE analysis
 → SAE train/check
 → activation QC
@@ -101,6 +102,40 @@ For the current CosMx example, activation roots may be kept outside the main wor
 ```
 
 A selected layer can later be symlinked or copied into the store root expected by downstream scripts, or the config can point directly to the activation store if the rest of the path structure is compatible.
+
+### Convert activation stores if needed
+
+Some model extraction scripts write activations directly in the generic `interpTFM` activation-store format:
+
+```text
+<store_root>/activations/<layer>/shard_*/activations.pt
+<store_root>/activations/<layer>/shard_*/index.pt
+```
+
+Other models may first write model-specific raw activation files. For example, C2S-scale extraction can write gene-batch files such as:
+
+```text
+<raw_c2s_root>/activations/<layer>/shard_*/batch_*_gene_acts.pt
+<raw_c2s_root>/activations/<layer>/shard_*/batch_*_cell_gene_pairs.txt
+```
+
+These raw files should be converted into the generic activation-store format before TIS, SAE training, activation QC, or downstream interpretation.
+
+For the current 3-model workflow:
+
+```text
+scGPT       usually writes generic activation-store shards directly
+Geneformer  usually writes generic activation-store shards directly
+C2S-scale   raw gene-batch activations should be converted before downstream use
+```
+
+The conversion utility should live in the package, for example:
+
+```text
+src/interp_pipeline/extraction/c2s_conversion.py
+```
+
+The runnable conversion command can be kept in comments or project notes if it contains dataset-specific paths.
 
 ### TIS pre-SAE analysis
 
@@ -210,6 +245,12 @@ Extracts hidden-state activations from a foundation model for one or more layers
 Current recommendation: run separately, outside the consolidated wrapper.
 
 Outputs should include activation shards for each selected layer.
+
+### Convert activation stores if needed
+
+Converts model-specific activation outputs into the generic `interpTFM` activation-store layout. This is required for models whose extractors do not directly write `activations.pt` and `index.pt` shard files.
+
+For C2S-scale, raw gene-batch activations should be converted before TIS, SAE training, activation QC, or downstream analysis.
 
 ### TIS pre-SAE analysis
 
@@ -378,7 +419,7 @@ PY
 
 Do not silently replace filenames with approximate matches. If a script is missing, either update the config to a verified current filename or disable the corresponding stage until the intended replacement is confirmed.
 
-<!-- ## CosMx lung example configuration
+## CosMx lung example configuration
 
 Example paths used in the current 3-model CosMx workflow:
 
@@ -411,4 +452,4 @@ python scripts/run_layer_workflow_3models.py \
   --config configs/layer_workflow_3models_cosmx.json \
   --only-layer-set cosmx_scgpt_l4__c2sscale_l17__geneformer_l4 \
   --stages sae_train_or_check activation_qc f1_heldout go_reduce f1_qc build_adata niche_validation niche_terms shuffle_control_crosstalk grouped_heatmaps immune_followups
-``` -->
+```
