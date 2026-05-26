@@ -96,3 +96,23 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# CODE=/maiziezhou_lab2/yunfei/Projects/interpTFM
+# ROOT=/maiziezhou_lab4/yunfei/Projects/interpTFM
+# XENIUM_ADATA=/maiziezhou_lab2/yunfei/datasets/xenium/xenium_prepared_annotated_ref2_subclass_l1_union_filtered_nonzero.h5ad
+
+# cd "$CODE"
+
+# python "$CODE/scripts/archived/extract_scgpt.py" \
+#   --adata-path "$XENIUM_ADATA" \
+#   --checkpoint /maiziezhou_lab/zihang/SpatialFoundationModel/eval/scGPT/whole-human-pretrain \
+#   --out-root "$ROOT/acts_extraction_scgpt_xenium_kidney" \
+#   --device cuda \
+#   --layers \
+#     layer_0.norm2 layer_1.norm2 layer_2.norm2 layer_3.norm2 \
+#     layer_4.norm2 layer_5.norm2 layer_6.norm2 layer_7.norm2 \
+#     layer_8.norm2 layer_9.norm2 layer_10.norm2 layer_11.norm2 \
+#   --batch-size 8 \
+#   --max-length 512 \
+#   --force
