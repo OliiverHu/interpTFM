@@ -44,8 +44,8 @@ TOP_K_TERMS   = 10            # cap on how many terms to use after the cutoff
 CLAMP_VALUES  = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
 
 ORGANISM          = "Homo sapiens"
-CELL_TYPE         = "lung fibroblast"   # negative control: feat=8208 near-zero (mean=0.016)
-POS_CTRL_CELL_TYPE = "mature neutrophil" # positive control: feat=8208 highly active (pct=91.8%)
+CELL_TYPE         = "lung fibroblast"   # negative control
+POS_CTRL_CELL_TYPE = "mature neutrophil" # positive control
 NUM_GENES     = 128
 MAX_NEW_TOKENS = NUM_GENES + 10   # extra headroom for BPE fragments
 N_GENERATIONS = 20
