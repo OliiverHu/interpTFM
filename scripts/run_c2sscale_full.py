@@ -26,7 +26,7 @@ from interp_pipeline.sae.trainers import fit_sae_for_layer
 # -----------------------------------------------------------------------------
 # Defaults aligned to the user's current setup
 # -----------------------------------------------------------------------------
-ADATA_SHARD_PATH = "/maiziezhou_lab2/yunfei/Projects/FM_temp/InterPLM/interplm/ge_shards/cosmx_human_lung_sec8.h5ad"
+ADATA_SHARD_PATH = "/maiziezhou_lab2/yunfei/Projects/FM_temp/interGFM/ge_shards/cosmx_human_lung_sec8.h5ad"
 ADATA_SOURCE_PATH = "/maiziezhou_lab2/yunfei/Projects/FM_temp/datasets/cosmx/lung/cosmx_human_lung.h5ad"
 MODEL_PATH = "/maiziezhou_lab2/yunfei/Projects/interpTFM-legacy/c2sscale/models/C2S-Scale-Gemma-2-2B"
 EXTRACTION_ROOT = "/maiziezhou_lab2/yunfei/Projects/interpTFM/c2s_full_extraction"

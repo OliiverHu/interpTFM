@@ -220,7 +220,7 @@ def parse_args():
     p.add_argument("--adata-path", default=ADATA_PATH)
     p.add_argument("--model-dir", default=MODEL_DIR)
     p.add_argument("--out-root", default=OUT_ROOT)
-    p.add_argument("--device", default="cuda")
+    p.add_argument("--device", default="cuda:0")
     p.add_argument("--layers", nargs="+", default=DEFAULT_LAYERS)
     p.add_argument("--latent-thresholds", nargs="+", type=float, default=DEFAULT_THRESHOLDS)
     p.add_argument("--skip-tokenize", action="store_true")
@@ -252,12 +252,14 @@ def main():
     print(f"TOKENIZED_PATH  = {tokenized_path}")
     print("=" * 80)
 
-    gt_csv = build_gprofiler_gt(
-        adata_path=args.adata_path,
-        out_dir=os.path.join(args.out_root, "gprofiler"),
-        alpha=GPROF_ALPHA,
-        sources=GPROF_SOURCES,
-    )
+    gt_csv = None
+    if not args.skip_heldout:
+        gt_csv = build_gprofiler_gt(
+            adata_path=args.adata_path,
+            out_dir=os.path.join(args.out_root, "gprofiler"),
+            alpha=GPROF_ALPHA,
+            sources=GPROF_SOURCES,
+        )
 
     prepared = prepare_geneformer_h5ad(
         adata_path=args.adata_path,
@@ -278,27 +280,33 @@ def main():
     if not os.path.exists(tokenized_path):
         raise FileNotFoundError(f"Tokenized dataset not found: {tokenized_path}")
 
-        if args.skip_extract:
-            print("[extract] skipped by flag")
-        else:
-            missing_layers = [
-                layer for layer in args.layers
-                if not geneformer_activation_shards_exist(args.out_root, layer)
-            ]
+    if args.skip_extract:
+        print("[extract] skipped by flag")
+    else:
+        missing_layers = [
+            layer for layer in args.layers
+            if not geneformer_activation_shards_exist(args.out_root, layer)
+        ]
 
-            if not missing_layers:
-                print(f"[extract] found existing activation shards for layers={args.layers}; skipping extraction")
-            else:
-                print(f"[extract] missing activation shards for layers={missing_layers}; running extraction")
-                extract_geneformer_to_store(
-                    model_dir=args.model_dir,
-                    tokenized_dataset_path=tokenized_path,
-                    store_root=args.out_root,
-                    layers=missing_layers,
-                    model_version=args.model_version,
-                    device=args.device,
-                    forward_batch_size=args.forward_batch_size,
-                )
+        if not missing_layers:
+            print(f"[extract] found existing activation shards for layers={args.layers}; skipping extraction")
+        else:
+            print(f"[extract] missing activation shards for layers={missing_layers}; running extraction")
+            extract_geneformer_to_store(
+                model_dir=args.model_dir,
+                tokenized_dataset_path=tokenized_path,
+                store_root=args.out_root,
+                layers=missing_layers,
+                model_version=args.model_version,
+                device=args.device,
+                forward_batch_size=args.forward_batch_size,
+            )
+
+    if args.skip_sae and args.skip_heldout:
+        print("[sae] skipped")
+        print("[heldout] skipped")
+        print("DONE")
+        return
 
     store = ActivationStore(ActivationStoreSpec(root=args.out_root))
     sae_ckpts: Dict[str, str] = {}
@@ -335,6 +343,9 @@ def main():
         print("DONE")
         return
 
+    if gt_csv is None:
+        raise RuntimeError("Internal error: gt_csv was not built, but heldout was requested.")
+
     patched_adata = prepare_heldout_adata_schema(args.adata_path, args.out_root)
 
     for layer in args.layers:
@@ -362,3 +373,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Extraction-only example:
+# python scripts/run_geneformer_full.py \
+#   --adata-path /maiziezhou_lab2/yunfei/Projects/FM_temp/interGFM/ge_shards/cosmx_human_lung_sec8.h5ad \
+#   --model-dir /maiziezhou_lab2/yunfei/geneformer_hf \
+#   --out-root /maiziezhou_lab2/yunfei/Projects/interpTFM/acts_extraction_geneformer_cosmx \
+#   --layers layer_1 layer_4 layer_7 layer_10 layer_12 layer_14 layer_16 layer_17 \
+#   --device cuda \
+#   --model-version V2 \
+#   --forward-batch-size 8 \
+#   --tokenizer-nproc 1 \
+#   --skip-sae \
+#   --skip-heldout
